@@ -1,6 +1,8 @@
 #include <jni.h>
 #include <vector>
 #include <string>
+#include <android/log.h>
+#include <chrono>
 #include "whisper.h"
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -30,8 +32,23 @@ Java_app_liveinterpreter_recognition_WhisperBridge_infer(JNIEnv *env, jobject, j
     p.print_realtime = false;
     p.print_timestamps = false;
     p.no_timestamps = true;
-    p.n_threads = 4;
+    // Low-latency, bounded inference for five-second microphone windows.
+    // Do not run a full default-context decoding pass for each short window.
+    p.n_threads = 2;
+    p.no_context = true;
+    p.single_segment = true;
+    p.max_tokens = 48;
+    p.audio_ctx = 384;
+    p.temperature_inc = 0.0f;
+    p.print_special = false;
+    __android_log_print(ANDROID_LOG_INFO, "LiveInterpreterASR", "Native inference starting: samples=%d", (int)n);
+    const auto start = std::chrono::steady_clock::now();
     int err = whisper_full(ctx, p, samples.data(), (int)n);
+    const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+    __android_log_print(err == 0 ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
+        "LiveInterpreterASR", "Native inference finished: code=%d elapsedMs=%lld",
+        err, static_cast<long long>(duration));
     env->ReleaseStringUTFChars(language, lang);
     if (err != 0) return env->NewStringUTF("");
     std::string result;
