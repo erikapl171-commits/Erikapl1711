@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "device_model": "",
+  "android_version": "",
+  "language": "lv",
+  "asr_engine": "whisper.cpp",
+  "asr_model": "",
+  "test_audio_id": "",
+  "test_audio_sha256": "",
+  "recording_duration_seconds": null,
+  "inference_busy_seconds": null,
+  "segments": []
+}

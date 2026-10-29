@@ -1,0 +1,11 @@
+----------------------------------------------------------------------
+Ran 9 tests in 0.001s
+
+OK
+PASS: 15 Stage 2 state-machine assertions
+Stage 3 ring buffer smoke: 9 checks passed
+Stage 4 scheduler / overlap assertions passed (9)
+Stage 5 translation queue: 12 assertions PASS
+Stage 6 queue: 10 checks passed
+Stage 6 source structural checks passed; Android compile/device NOT verified
+Terminated
