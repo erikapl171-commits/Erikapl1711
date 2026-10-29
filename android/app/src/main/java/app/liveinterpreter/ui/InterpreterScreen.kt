@@ -78,7 +78,9 @@ import android.os.Build
 import androidx.compose.runtime.DisposableEffect
 import app.liveinterpreter.capture.MicrophoneService
 import app.liveinterpreter.capture.SessionRepository
-import java.io.File
+import app.liveinterpreter.recognition.SpeechModelInstaller
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.liveinterpreter.core.DemoPhase
 import app.liveinterpreter.core.InterpreterUiState
@@ -106,7 +108,11 @@ fun InterpreterScreen(model: InterpreterViewModel) {
     var translatedSegments by remember { mutableStateOf(listOf<String>()) }
     var translationStatus by remember { mutableStateOf("Waiting for microphone") }
     var lastTranslationSequence by remember { mutableStateOf(0L) }
-    val modelPresent = remember(context) { File(context.filesDir, "models/ggml-base.bin").isFile }
+    var modelPresent by remember { mutableStateOf(SpeechModelInstaller.isInstalled(context)) }
+    var downloadingModel by remember { mutableStateOf(false) }
+    var modelProgress by remember { mutableStateOf(0) }
+    var modelMessage by remember { mutableStateOf("") }
+    val modelScope = rememberCoroutineScope()
     val speaker = remember(context) { EnglishSpeaker(context) { speechStatus = it } }
     DisposableEffect(speaker) { onDispose { speaker.close() } }
     LaunchedEffect(state.audioEnabled, speaker) { speaker.setEnabled(state.audioEnabled) }
@@ -200,8 +206,25 @@ fun InterpreterScreen(model: InterpreterViewModel) {
                 DemoNotice()
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(14.dp)) {
-                        Text("Speech model: " + if (modelPresent) "File present (not validated)" else "Missing", fontWeight = FontWeight.SemiBold)
-                        Text("Expected location: internal files/models/ggml-base.bin. The app currently has no safe in-app model installer. Recognition requires this model and a compiled whisper.cpp library.", fontSize = 12.sp)
+                        Text("Speech model: " + if (modelPresent) "Installed and verified" else "Not installed", fontWeight = FontWeight.SemiBold)
+                        Text("Multilingual Whisper base model, approximately 148 MB. Download over Wi-Fi to avoid mobile data charges. Keep this screen open until installation completes.", fontSize = 12.sp)
+                        if (!modelPresent) {
+                            Spacer(Modifier.height(8.dp))
+                            Button(enabled = !downloadingModel, onClick = {
+                                modelScope.launch {
+                                    downloadingModel = true
+                                    modelMessage = "Downloading model..."
+                                    try {
+                                        SpeechModelInstaller.install(context) { modelProgress = it }
+                                        modelPresent = SpeechModelInstaller.isInstalled(context)
+                                        modelMessage = if (modelPresent) "Model installed. Start a new microphone session." else "Verification failed"
+                                    } catch (e: Exception) {
+                                        modelMessage = "Download failed: ${e.message ?: "connection error"}"
+                                    } finally { downloadingModel = false }
+                                }
+                            }) { Text(if (downloadingModel) "Downloading $modelProgress%" else "Download speech model") }
+                        }
+                        if (modelMessage.isNotBlank()) Text(modelMessage, fontSize = 12.sp)
                     }
                 }
                 OutlinedButton(onClick = {
