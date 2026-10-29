@@ -63,6 +63,7 @@ class MicrophoneService : Service() {
     private var worker: Thread? = null
     private val inference = Executors.newSingleThreadExecutor()
     private val busy = AtomicBoolean(false)
+    @Volatile private var inferenceStartedAtMs = 0L
     @Volatile private var bridge: WhisperBridge? = null
     @Volatile private var asrState = "ASR not initialized"
     private var lastTranscript = ""
@@ -143,6 +144,7 @@ class MicrophoneService : Service() {
         inferenceAttempts = 0
         inferenceEmpty = 0
         inferenceDetails = "Waiting for first five seconds of audio"
+        inferenceStartedAtMs = 0L
         val model = File(filesDir, "models/ggml-base.bin")
         if (!model.isFile) {
             asrState = "ASR model missing"
@@ -207,8 +209,10 @@ class MicrophoneService : Service() {
                             try {
                                 if (running.get()) {
                                     val began = SystemClock.elapsedRealtime()
+                                    inferenceStartedAtMs = began
                                     val result = bridge?.transcribe(snapshot, currentLanguage).orEmpty()
                                     val elapsed = SystemClock.elapsedRealtime() - began
+                                    inferenceStartedAtMs = 0L
                                     if (result.isBlank()) inferenceEmpty++
                                     inferenceDetails = "Whisper window $attempt finished in ${elapsed}ms; empty $inferenceEmpty/$attempt; audio RMS ${"%.4f".format(java.util.Locale.US, energy)}"
                                     notifyStatus("Capturing microphone; $asrState; $inferenceDetails", total)
@@ -231,14 +235,20 @@ class MicrophoneService : Service() {
                             } catch (e: Exception) {
                                 asrState = "ASR error in window $attempt: ${e.message ?: e.javaClass.simpleName}"
                                 notifyStatus(asrState)
-                            } finally { snapshot.fill(0); busy.set(false) }
+                            } finally { inferenceStartedAtMs = 0L; snapshot.fill(0); busy.set(false) }
                         } } catch (_: RejectedExecutionException) {
                             snapshot.fill(0)
                             busy.set(false)
                         }
                     }
                     if (total - lastReport >= RATE) {
-                        notifyStatus("Capturing microphone; $asrState; $inferenceDetails", total)
+                        val activeMs = inferenceStartedAtMs
+                        val info = if (busy.get() && activeMs > 0L) {
+                            val elapsed = SystemClock.elapsedRealtime() - activeMs
+                            "$inferenceDetails; inference elapsed ${elapsed / 1000}s" +
+                                if (elapsed > 30000L) "; unusually slow" else ""
+                        } else inferenceDetails
+                        notifyStatus("Capturing microphone; $asrState; $info", total)
                         lastReport = total
                     }
                 } else {
