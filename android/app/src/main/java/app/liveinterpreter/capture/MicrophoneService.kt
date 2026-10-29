@@ -20,6 +20,7 @@ import androidx.core.content.ContextCompat
 import app.liveinterpreter.MainActivity
 import app.liveinterpreter.R
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.Executors
 import app.liveinterpreter.recognition.WhisperBridge
 import app.liveinterpreter.recognition.StreamingWindow
@@ -61,6 +62,7 @@ class MicrophoneService : Service() {
     private val inference = Executors.newSingleThreadExecutor()
     private val busy = AtomicBoolean(false)
     @Volatile private var bridge: WhisperBridge? = null
+    @Volatile private var asrState = "ASR not initialized"
     private var lastTranscript = ""
     private val scheduler = StreamingWindow()
     private var language = "lv"
@@ -134,11 +136,25 @@ class MicrophoneService : Service() {
         scheduler.reset()
         lastTranscript = ""
         val model = File(filesDir, "models/ggml-base.bin")
-        if (!model.isFile) notifyStatus("ASR model missing: install ggml-base.bin (microphone still active)")
-        else inference.execute {
-            try { bridge = WhisperBridge(model.absolutePath) }
-            catch (e: Exception) { notifyStatus("ASR unavailable: ${e.message}") }
-            catch (e: UnsatisfiedLinkError) { notifyStatus("ASR library unavailable") }
+        if (!model.isFile) {
+            asrState = "ASR model missing"
+            notifyStatus(asrState)
+        } else inference.execute {
+            asrState = "Initializing Whisper"
+            try {
+                val instance = WhisperBridge(model.absolutePath)
+                if (running.get()) {
+                    bridge = instance
+                    asrState = "Whisper ready"
+                } else {
+                    instance.close()
+                }
+            } catch (e: Exception) {
+                asrState = "ASR unavailable: ${e.message ?: e.javaClass.simpleName}"
+            } catch (e: UnsatisfiedLinkError) {
+                asrState = "ASR native library unavailable"
+            }
+            if (running.get()) notifyStatus(asrState)
         }
         worker = thread(name = "mic-capture", isDaemon = true) { captureLoop() }
     }
@@ -157,7 +173,7 @@ class MicrophoneService : Service() {
             recorder = record
             record.startRecording()
             check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "Could not record" }
-            notifyStatus("Capturing microphone (not translating)")
+            notifyStatus("Capturing microphone; $asrState")
             val chunk = ShortArray(RATE / 10)
             var total = 0L
             var lastReport = 0L
@@ -171,7 +187,7 @@ class MicrophoneService : Service() {
                     if (scheduler.accept(count) && bridge != null && busy.compareAndSet(false, true)) {
                         val snapshot = buffer.snapshot().takeLast(16000 * 5).toShortArray()
                         val currentLanguage = language
-                        inference.execute {
+                        try { inference.execute {
                             try {
                                 if (running.get()) {
                                     val result = bridge?.transcribe(snapshot, currentLanguage).orEmpty()
@@ -191,12 +207,17 @@ class MicrophoneService : Service() {
                                             .putExtra(EXTRA_TRANSCRIPT, tail))
                                     }
                                 }
-                            } catch (e: Exception) { notifyStatus("ASR error: ${e.message}") }
-                            finally { snapshot.fill(0); busy.set(false) }
+                            } catch (e: Exception) {
+                                asrState = "ASR error: ${e.message ?: e.javaClass.simpleName}"
+                                notifyStatus(asrState)
+                            } finally { snapshot.fill(0); busy.set(false) }
+                        } } catch (_: RejectedExecutionException) {
+                            snapshot.fill(0)
+                            busy.set(false)
                         }
                     }
                     if (total - lastReport >= RATE) {
-                        notifyStatus("Capturing microphone (not translating)", total)
+                        notifyStatus("Capturing microphone; $asrState", total)
                         lastReport = total
                     }
                 } else {
@@ -256,6 +277,20 @@ class MicrophoneService : Service() {
         notifyStatus("Stopped")
     }
 
-    override fun onDestroy() { halt(); inference.shutdownNow(); bridge?.close(); bridge = null; translator?.close(); translator = null; super.onDestroy() }
+    override fun onDestroy() {
+        halt()
+        // All Whisper JNI calls, including close(), must execute on the SAME serial
+        // worker. Never close a native context while transcribe() may be using it.
+        try {
+            inference.execute {
+                try { bridge?.close() } catch (_: Exception) { }
+                finally { bridge = null }
+            }
+        } catch (_: RejectedExecutionException) { /* already shutting down */ }
+        inference.shutdown() // drain in-flight recognition and queued native close
+        translator?.close()
+        translator = null
+        super.onDestroy()
+    }
     override fun onBind(intent: Intent?): IBinder? = null
 }
