@@ -31,6 +31,8 @@ import app.liveinterpreter.translation.TranslationQueue
 import android.os.Handler
 import android.os.Looper
 import kotlin.concurrent.thread
+import android.os.SystemClock
+import kotlin.math.sqrt
 
 /** Foreground-only start, continuous PCM acquisition; ASR is a later stage. */
 class MicrophoneService : Service() {
@@ -64,6 +66,9 @@ class MicrophoneService : Service() {
     @Volatile private var bridge: WhisperBridge? = null
     @Volatile private var asrState = "ASR not initialized"
     private var lastTranscript = ""
+    private var inferenceAttempts = 0L
+    private var inferenceEmpty = 0L
+    @Volatile private var inferenceDetails = "Waiting for first five seconds of audio"
     private val scheduler = StreamingWindow()
     private var language = "lv"
     @Volatile private var recorder: AudioRecord? = null
@@ -135,6 +140,9 @@ class MicrophoneService : Service() {
         buffer.clear()
         scheduler.reset()
         lastTranscript = ""
+        inferenceAttempts = 0
+        inferenceEmpty = 0
+        inferenceDetails = "Waiting for first five seconds of audio"
         val model = File(filesDir, "models/ggml-base.bin")
         if (!model.isFile) {
             asrState = "ASR model missing"
@@ -187,10 +195,23 @@ class MicrophoneService : Service() {
                     if (scheduler.accept(count) && bridge != null && busy.compareAndSet(false, true)) {
                         val snapshot = buffer.snapshot().takeLast(16000 * 5).toShortArray()
                         val currentLanguage = language
+                        val energy = sqrt(snapshot.fold(0.0) { sum, value ->
+                            val sample = value.toDouble() / 32768.0
+                            sum + sample * sample
+                        } / snapshot.size.coerceAtLeast(1))
+                        inferenceAttempts++
+                        val attempt = inferenceAttempts
+                        inferenceDetails = "Whisper processing window $attempt; audio RMS ${"%.4f".format(java.util.Locale.US, energy)}"
+                        notifyStatus("Capturing microphone; $asrState; $inferenceDetails", total)
                         try { inference.execute {
                             try {
                                 if (running.get()) {
+                                    val began = SystemClock.elapsedRealtime()
                                     val result = bridge?.transcribe(snapshot, currentLanguage).orEmpty()
+                                    val elapsed = SystemClock.elapsedRealtime() - began
+                                    if (result.isBlank()) inferenceEmpty++
+                                    inferenceDetails = "Whisper window $attempt finished in ${elapsed}ms; empty $inferenceEmpty/$attempt; audio RMS ${"%.4f".format(java.util.Locale.US, energy)}"
+                                    notifyStatus("Capturing microphone; $asrState; $inferenceDetails", total)
                                     val tail = TranscriptOverlap.newTail(lastTranscript, result)
                                     if (tail.isNotBlank() && running.get()) {
                                         lastTranscript = result
@@ -208,7 +229,7 @@ class MicrophoneService : Service() {
                                     }
                                 }
                             } catch (e: Exception) {
-                                asrState = "ASR error: ${e.message ?: e.javaClass.simpleName}"
+                                asrState = "ASR error in window $attempt: ${e.message ?: e.javaClass.simpleName}"
                                 notifyStatus(asrState)
                             } finally { snapshot.fill(0); busy.set(false) }
                         } } catch (_: RejectedExecutionException) {
@@ -217,7 +238,7 @@ class MicrophoneService : Service() {
                         }
                     }
                     if (total - lastReport >= RATE) {
-                        notifyStatus("Capturing microphone; $asrState", total)
+                        notifyStatus("Capturing microphone; $asrState; $inferenceDetails", total)
                         lastReport = total
                     }
                 } else {
